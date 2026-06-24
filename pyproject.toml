@@ -1,0 +1,39 @@
+[project]
+name = "jepa-cmu-mocap"
+version = "0.1.0"
+description = "Skeleton-JEPA self-supervised motion model on CMU MoCap"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.0",
+    "numpy>=2.5.0",
+    "npybvh",
+    "pyyaml>=6.0.3",
+    "scipy>=1.18.0",
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
+]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+npybvh = { path = "third_party/npybvh" }
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools]
+packages = ["data", "models", "training", "eval"]
+py-modules = ["utils"]
+
+[project.scripts]
+skeleton-jepa-train = "training.train:main"
+skeleton-jepa-parse = "data.bvh_parser:main"
+skeleton-jepa-probe = "eval.linear_probe:main"
+skeleton-jepa-rollout = "eval.rollout:main"
+skeleton-jepa-render = "eval.render:main"

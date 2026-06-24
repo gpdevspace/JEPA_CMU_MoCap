@@ -1,0 +1,32 @@
+infrastructure:
+  device: "mps"
+  seed: 42
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  downsample_rate: 4
+  horizons: [3, 5, 8]
+  batch_size: 256
+
+model:
+  pose_dim: 93          # Dynamically overridden by actual parsed joint count * 3
+  repr_dim: 256
+  proj_dim: 256
+  pred_dim: 256
+  latent_dim: 32
+  num_classes: 6        # Walking, Running, Jumping, Boxing, Dancing, etc.
+
+training:
+  use_latent: false     # Set true for Phase 2 latent-conditioned training
+  epochs: 100
+  lr: 0.0003
+  weight_decay: 1e-5
+  ema_momentum_start: 0.996
+  ema_momentum_end: 0.999
+  vicreg:
+    sim_weight: 25.0
+    var_weight: 25.0
+    cov_weight: 1.0
+  kinematic:
+    bone_weight: 10.0   # Enforces rigid body mechanics
