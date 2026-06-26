@@ -7,12 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data.dataset import SkeletonPairDataset
 from models.jepa import JEPA
-from training.losses import kinematic_bone_loss, vicreg_loss
-from utils import load_config, resolve_device, ROOT
+from training.losses import kinematic_bone_loss, compute_jepa_loss
+from utils import load_config, resolve_device, skeleton_fk_args, ROOT
 
 
 def set_seed(seed: int) -> None:
@@ -77,6 +78,7 @@ def train(config_path: Path | None = None) -> None:
         latent_dim=config["model"]["latent_dim"],
         num_classes=config["model"]["num_classes"],
         use_latent=use_latent,
+        **skeleton_fk_args(meta),
     ).to(device)
 
     ref_bone_lengths = build_ref_bone_lengths(meta, device, torch.float32)
@@ -112,21 +114,22 @@ def train(config_path: Path | None = None) -> None:
             )
             model.set_ema_momentum(momentum)
 
-            s_y_hat, s_y = model(x, y, labels if use_latent else None)
+            s_y_hat, s_y, s_x = model(x, y, labels if use_latent else None)
 
-            loss = vicreg_loss(
-                s_y_hat,
-                s_y,
-                sim_w=vicreg_cfg["sim_weight"],
-                var_w=vicreg_cfg["var_weight"],
-                cov_w=vicreg_cfg["cov_weight"],
-            )
+            loss, inv_loss, var_loss = compute_jepa_loss(s_y_hat, s_y, s_x, config)
+            
+            if global_step % 10 == 0:
+                print(f"  Step {global_step} | loss={loss.item():.4f} | inv={inv_loss.item():.4f} | var={var_loss.item():.4f}")
 
             if bone_weight > 0:
-                pred_poses = model.decode_pose(s_y_hat).view(-1, num_joints, 3)
-                loss = loss + bone_weight * kinematic_bone_loss(
+                pred_repr = F.normalize(s_x + s_y_hat, p=2, dim=-1)
+                pred_poses = model.decode_pose(pred_repr).view(-1, num_joints, 3)
+                kin_loss = kinematic_bone_loss(
                     pred_poses, ref_bone_lengths, meta["bone_pairs"]
                 )
+                loss = loss + bone_weight * kin_loss
+            else:
+                kin_loss = torch.tensor(0.0)
 
             optimizer.zero_grad()
             loss.backward()
@@ -137,7 +140,7 @@ def train(config_path: Path | None = None) -> None:
             global_step += 1
 
         avg_loss = epoch_loss / max(1, len(loader))
-        print(f"Epoch {epoch + 1}/{epochs} | loss={avg_loss:.4f} | ema_m={momentum:.6f}")
+        print(f"Epoch {epoch + 1}/{epochs} | loss={avg_loss:.4f} | inv={inv_loss.item():.4f} | var={var_loss.item():.4f} | kin={kin_loss.item():.4f} | ema_m={momentum:.6f}")
 
     ckpt_path = checkpoint_dir / "jepa_latest.pt"
     torch.save(

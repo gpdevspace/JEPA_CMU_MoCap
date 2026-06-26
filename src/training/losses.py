@@ -45,3 +45,34 @@ def kinematic_bone_loss(pred_poses, ref_bone_lengths, joint_map):
         )
         loss = loss + F.mse_loss(predicted_len, ref_tensor.expand_as(predicted_len))
     return loss
+
+
+def compute_jepa_loss(pred_delta, target_repr, online_repr, config):
+    """
+    pred_delta: [B, repr_dim] -> Predicted shift (Output of Online Predictor)
+    target_repr: [B, repr_dim] -> Output of EMA Target Encoder
+    online_repr: [B, repr_dim] -> Output of Online Encoder/Projector
+    """
+    # Calculate the true target shift
+    target_delta = target_repr - online_repr
+    
+    # 1. Directional Invariance Loss (MSE against Target Delta)
+    invariance_loss = F.mse_loss(pred_delta, target_delta)
+    
+    # 2. Variance regularization on the unit sphere of the reconstructed representation.
+    # Reconstruct predicted representation: online_repr + pred_delta
+    pred_repr = online_repr + pred_delta
+    pred_norm = F.normalize(pred_repr, p=2, dim=-1)
+    
+    # On a d-dim unit sphere each dimension has std ~ 1/sqrt(d) when uniform.
+    # We want to push std ABOVE that floor, not just equal to it.
+    # Using 1/sqrt(d) as threshold means the penalty barely fires at all.
+    # Instead use a fixed threshold of 0.1 — meaningful pressure on a [-1,1] sphere.
+    std_pred = torch.sqrt(pred_norm.var(dim=0) + 1e-4)
+    variance_loss = torch.mean(F.relu(0.1 - std_pred))
+    
+    # 3. Total Loss Composition (Keep weights disciplined)
+    # Avoid cranking weights to 500. Let the sphere handle the scale.
+    total_loss = (config["loss"]["invariance_weight"] * invariance_loss) + (config["loss"]["variance_weight"] * variance_loss)
+    
+    return total_loss, invariance_loss, variance_loss

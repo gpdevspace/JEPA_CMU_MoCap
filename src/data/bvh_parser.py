@@ -26,8 +26,10 @@ def _ordered_joints(root_joint) -> list:
     return joints
 
 
-def _parse_bvh(path: Path) -> tuple[np.ndarray, list, list[tuple[int, int]]]:
-    """Return global positions (T, J, 3), joint names, and parent-child index pairs."""
+def _parse_bvh(
+    path: Path,
+) -> tuple[np.ndarray, list[str], list[tuple[int, int]], list]:
+    """Return global positions (T, J, 3), joint names, bone pairs, and joint objects."""
     bvh = Bvh()
     bvh.parse_file(str(path))
     all_positions, _ = bvh.all_frame_poses()
@@ -44,7 +46,26 @@ def _parse_bvh(path: Path) -> tuple[np.ndarray, list, list[tuple[int, int]]]:
             parent_idx = name_to_idx[joint.parent.name]
             bone_pairs.append((parent_idx, i))
 
-    return positions, joint_names, bone_pairs
+    return positions, joint_names, bone_pairs, joints
+
+
+def _extract_hierarchy(
+    joints: list, global_scale: float
+) -> tuple[list[int], np.ndarray]:
+    """Build parent index array and local bone offsets from BVH rest hierarchy."""
+    name_to_idx = {j.name: i for i, j in enumerate(joints)}
+    parents: list[int] = []
+    offsets = np.zeros((len(joints), 3), dtype=np.float32)
+
+    for i, joint in enumerate(joints):
+        if joint.parent is None or joint.parent.name.endswith("_end"):
+            parents.append(-1)
+            offsets[i] = 0.0
+        else:
+            parents.append(name_to_idx[joint.parent.name])
+            offsets[i] = (joint.offset / global_scale).astype(np.float32)
+
+    return parents, offsets
 
 
 def _hips_center(positions: np.ndarray, hips_idx: int) -> np.ndarray:
@@ -94,7 +115,7 @@ def process_dataset(
     all_bone_lengths: dict[tuple[int, int], list[float]] = {}
 
     for bvh_path in bvh_files:
-        positions, joint_names, bone_pairs = _parse_bvh(bvh_path)
+        positions, joint_names, bone_pairs, joints = _parse_bvh(bvh_path)
         hips_idx = joint_names.index("Hips") if "Hips" in joint_names else 0
 
         left_leg_candidates = ["LeftUpLeg", "LeftHip", "LHipJoint"]
@@ -105,10 +126,13 @@ def process_dataset(
 
         if global_scale is None:
             global_scale = _reference_scale(positions, hips_idx, left_leg_idx)
+            parents, bone_offsets = _extract_hierarchy(joints, global_scale)
             skeleton_meta = {
                 "joint_names": joint_names,
                 "bone_pairs": bone_pairs,
                 "hips_idx": hips_idx,
+                "parents": parents,
+                "bone_offsets": bone_offsets.tolist(),
             }
 
         centered = _hips_center(positions, hips_idx)
@@ -155,6 +179,9 @@ def process_dataset(
                 },
                 "action_classes": ACTION_CLASSES,
                 "pose_dim": len(skeleton_meta["joint_names"]) * 3,
+                "num_joints": len(skeleton_meta["joint_names"]),
+                "parents": skeleton_meta["parents"],
+                "bone_offsets": skeleton_meta["bone_offsets"],
             },
             f,
             indent=2,

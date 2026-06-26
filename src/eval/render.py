@@ -37,9 +37,13 @@ def render_trajectory(
             linewidth=1.2,
         )
 
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_zlim(-1.5, 1.5)
+    # DYNAMIC SCALING:
+    # Find the max extent of the skeleton to keep it in frame
+    max_val = np.max(np.abs(pos)) + 0.1
+    ax.set_xlim(-max_val, max_val)
+    ax.set_ylim(-max_val, max_val)
+    ax.set_zlim(-max_val, max_val)
+    
     ax.set_xlabel("X")
     ax.set_ylabel("Z")
     ax.set_zlabel("Y")
@@ -49,8 +53,9 @@ def render_trajectory(
 def trajectories_to_positions(trajectories: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     out = {}
     for name, traj in trajectories.items():
-        num_joints = traj.shape[1] // 3
-        out[name] = traj.reshape(traj.shape[0], num_joints, 3)
+        # Using -1 allows numpy to automatically calculate the correct number of joints
+        # based on the remaining dimensions (assuming 3 coordinates per joint)
+        out[name] = traj.reshape(traj.shape[0], -1, 3)
     return out
 
 

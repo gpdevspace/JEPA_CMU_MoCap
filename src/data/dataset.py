@@ -18,10 +18,15 @@ class SkeletonPairDataset(Dataset):
         horizons: list[int] | None = None,
         seed: int = 42,
         clip_ids: list[str] | None = None,
+        fixed_horizon: int | None = None,
     ):
         config = load_config()
         self.processed_dir = Path(processed_dir or ROOT / config["data"]["processed_dir"])
-        self.horizons = horizons or config["data"]["horizons"]
+        self.fixed_horizon = fixed_horizon
+        if fixed_horizon is not None:
+            self.horizons = [fixed_horizon]
+        else:
+            self.horizons = horizons or config["data"]["horizons"]
         self.max_horizon = max(self.horizons)
         self.rng = random.Random(seed)
 
