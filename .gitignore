@@ -17,3 +17,5 @@ outputs/
 third_party/npybvh/.git/
 third_party/npybvh
 
+history.md
+docs/
