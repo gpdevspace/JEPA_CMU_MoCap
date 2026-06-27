@@ -18,10 +18,15 @@ class SkeletonPairDataset(Dataset):
         horizons: list[int] | None = None,
         seed: int = 42,
         clip_ids: list[str] | None = None,
+        fixed_horizon: int | None = None,
     ):
         config = load_config()
         self.processed_dir = Path(processed_dir or ROOT / config["data"]["processed_dir"])
-        self.horizons = horizons or config["data"]["horizons"]
+        self.fixed_horizon = fixed_horizon
+        if fixed_horizon is not None:
+            self.horizons = [fixed_horizon]
+        else:
+            self.horizons = horizons or config["data"]["horizons"]
         self.max_horizon = max(self.horizons)
         self.rng = random.Random(seed)
 
@@ -51,16 +56,22 @@ class SkeletonPairDataset(Dataset):
         if not self.clips:
             raise RuntimeError(f"No valid clips found in {self.processed_dir}")
 
-        self._length = sum(c["num_frames"] - self.max_horizon for c in self.clips)
+        # Deterministic flat index -> (clip_idx, t) map for full, even epoch coverage.
+        # Every valid start frame t in [0, num_frames - max_horizon) is one sample.
+        self.index_map: list[tuple[int, int]] = []
+        for clip_idx, clip in enumerate(self.clips):
+            for t in range(clip["num_frames"] - self.max_horizon):
+                self.index_map.append((clip_idx, t))
 
     def __len__(self) -> int:
-        return self._length
+        return len(self.index_map)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        clip = self.rng.choice(self.clips)
-        max_t = clip["num_frames"] - self.max_horizon - 1
-        t = self.rng.randint(0, max_t)
-        k = self.rng.choice(self.horizons)
+        clip_idx, t = self.index_map[idx]
+        clip = self.clips[clip_idx]
+
+        # Deterministic horizon per index (cycles through the configured horizons).
+        k = self.horizons[idx % len(self.horizons)]
 
         poses = clip["poses"]
         x = poses[t].astype(np.float32)

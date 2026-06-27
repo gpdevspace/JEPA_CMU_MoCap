@@ -9,10 +9,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+import torch.nn.functional as F
 from data.dataset import SkeletonPairDataset
 from models.components import Encoder
 from models.jepa import JEPA
-from utils import ACTION_CLASSES, load_config, resolve_device, ROOT
+from utils import ACTION_CLASSES, load_config, resolve_device, skeleton_fk_args, ROOT
 
 
 class FrameClassificationDataset(Dataset):
@@ -131,8 +132,9 @@ def run_linear_probe(config_path: Path | None = None) -> None:
             latent_dim=config["model"]["latent_dim"],
             num_classes=num_classes,
             use_latent=ckpt["config"]["training"]["use_latent"],
+            **skeleton_fk_args(meta),
         )
-        jepa.load_state_dict(ckpt["model_state_dict"])
+        jepa.load_state_dict(ckpt["model_state_dict"], strict=False)
         trained_encoder.load_state_dict(jepa.encoder.state_dict())
     else:
         print("Warning: no checkpoint found; using untrained encoder weights")

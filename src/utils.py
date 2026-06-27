@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 
@@ -25,19 +26,14 @@ def resolve_device(config: dict) -> torch.device:
 
 ACTION_CLASSES = [
     "walking",
-    "running",
     "jumping",
     "boxing",
-    "dancing",
-    "other",
 ]
 
 ACTION_KEYWORDS = {
     "walking": ["walk", "walkturn", "walkstop"],
-    "running": ["run", "jog", "sprint"],
     "jumping": ["jump", "hop", "leap"],
     "boxing": ["box", "punch", "kick"],
-    "dancing": ["dance", "waltz", "swing"],
 }
 
 
@@ -47,3 +43,12 @@ def infer_action_label(name: str) -> int:
         if any(kw in lower for kw in keywords):
             return class_idx
     return len(ACTION_CLASSES) - 1
+
+
+def skeleton_fk_args(meta: dict) -> dict:
+    """Extract FK decoder arguments from skeleton metadata."""
+    return {
+        "num_joints": meta["num_joints"],
+        "parents": meta["parents"],
+        "bone_offsets": np.array(meta["bone_offsets"], dtype=np.float32),
+    }

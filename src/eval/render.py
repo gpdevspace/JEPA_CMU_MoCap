@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from eval.rollout import run_rollout
-from utils import ACTION_CLASSES, load_config, ROOT
+from utils import load_config, ROOT
 
 
 def render_trajectory(
@@ -37,9 +37,13 @@ def render_trajectory(
             linewidth=1.2,
         )
 
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_zlim(-1.5, 1.5)
+    # DYNAMIC SCALING:
+    # Find the max extent of the skeleton to keep it in frame
+    max_val = np.max(np.abs(pos)) + 0.1
+    ax.set_xlim(-max_val, max_val)
+    ax.set_ylim(-max_val, max_val)
+    ax.set_zlim(-max_val, max_val)
+    
     ax.set_xlabel("X")
     ax.set_ylabel("Z")
     ax.set_zlabel("Y")
@@ -49,8 +53,9 @@ def render_trajectory(
 def trajectories_to_positions(trajectories: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     out = {}
     for name, traj in trajectories.items():
-        num_joints = traj.shape[1] // 3
-        out[name] = traj.reshape(traj.shape[0], num_joints, 3)
+        # Using -1 allows numpy to automatically calculate the correct number of joints
+        # based on the remaining dimensions (assuming 3 coordinates per joint)
+        out[name] = traj.reshape(traj.shape[0], -1, 3)
     return out
 
 
@@ -62,17 +67,19 @@ def render_comparison(
 ) -> None:
     positions = trajectories_to_positions(trajectories)
     names = list(positions.keys())
-    num_frames = min(len(positions[n]) for n in names)
+    n = len(names)
+    num_frames = min(len(positions[name]) for name in names)
 
-    fig = plt.figure(figsize=(15, 5))
-    axes = [fig.add_subplot(1, 3, i + 1, projection="3d") for i in range(3)]
-    colors = ["forestgreen", "crimson", "darkorange"]
+    fig = plt.figure(figsize=(5 * n, 5))
+    axes = [fig.add_subplot(1, n, i + 1, projection="3d") for i in range(n)]
+    palette = ["forestgreen", "crimson", "darkorange", "royalblue"]
 
     def update(frame_idx):
         artists = []
-        for i, name in enumerate(names[:3]):
-            render_trajectory(axes[i], positions[name], bone_pairs, frame_idx, colors[i])
-            axes[i].set_title(f"Z = {name}")
+        for i, name in enumerate(names):
+            color = palette[i % len(palette)]
+            render_trajectory(axes[i], positions[name], bone_pairs, frame_idx, color)
+            axes[i].set_title(name.replace("_", " ").title())
             artists.extend(axes[i].collections)
             artists.extend(axes[i].lines)
         return artists
@@ -100,9 +107,10 @@ def render_comparison(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Render latent traversal comparison")
+    parser = argparse.ArgumentParser(description="Render ground-truth vs JEPA-predicted motion")
     parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--steps", type=int, default=60)
+    parser.add_argument("--steps", type=int, default=150)
+    parser.add_argument("--horizon", type=int, default=5)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -110,14 +118,9 @@ def main() -> None:
     with open(processed_dir / "skeleton.json") as f:
         meta = json.load(f)
 
-    action_labels = [
-        ACTION_CLASSES.index("walking"),
-        ACTION_CLASSES.index("jumping"),
-        ACTION_CLASSES.index("boxing"),
-    ]
-    trajectories = run_rollout(args.config, steps=args.steps, action_labels=action_labels)
+    trajectories = run_rollout(args.config, steps=args.steps, horizon=args.horizon)
 
-    output_path = ROOT / "outputs" / "videos" / "latent_traversal_comparison.mp4"
+    output_path = ROOT / "outputs" / "videos" / "prediction_vs_groundtruth.mp4"
     render_comparison(trajectories, meta["bone_pairs"], output_path)
 
 
