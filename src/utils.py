@@ -26,19 +26,14 @@ def resolve_device(config: dict) -> torch.device:
 
 ACTION_CLASSES = [
     "walking",
-    "running",
     "jumping",
     "boxing",
-    "dancing",
-    "other",
 ]
 
 ACTION_KEYWORDS = {
     "walking": ["walk", "walkturn", "walkstop"],
-    "running": ["run", "jog", "sprint"],
     "jumping": ["jump", "hop", "leap"],
     "boxing": ["box", "punch", "kick"],
-    "dancing": ["dance", "waltz", "swing"],
 }
 
 

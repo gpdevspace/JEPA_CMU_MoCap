@@ -14,9 +14,7 @@ Place raw `.bvh` files under `data/raw/` (optionally grouped in subfolders by ac
 
 ```bash
 uv run python -m data.bvh_parser          # parse BVH → npz caches
-uv run python -m training.train           # Phase 1 (use_latent: false)
-uv run python -m eval.linear_probe        # representation sanity check
-# Set training.use_latent: true in configs/config.yaml for Phase 2
-uv run python -m eval.rollout
-uv run python -m eval.render
+uv run python -m training.train           # train JEPA (encoder + predictor + FK decoder jointly)
+uv run python -m eval.linear_probe        # representation sanity check (action linear probe)
+uv run python -m eval.render              # render ground-truth vs JEPA-predicted motion (mp4)
 ```

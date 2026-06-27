@@ -50,28 +50,14 @@ class ActionEmbedding(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(
-        self,
-        proj_dim: int = 256,
-        pred_dim: int = 256,
-        latent_dim: int = 32,
-        use_latent: bool = False,
-    ):
-        super().__init__()
-        self.use_latent = use_latent
-        input_dim = proj_dim + latent_dim if use_latent else proj_dim
-        self.mlp = MLP([input_dim, 128, pred_dim])
+    """Predicts the future embedding from the context embedding (unconditioned)."""
 
-    def forward(
-        self, representation: torch.Tensor, z_embedding: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        if self.use_latent:
-            if z_embedding is None:
-                raise ValueError("z_embedding required when use_latent=True")
-            x = torch.cat([representation, z_embedding], dim=-1)
-        else:
-            x = representation
-        return self.mlp(x)
+    def __init__(self, proj_dim: int = 256, pred_dim: int = 256):
+        super().__init__()
+        self.mlp = MLP([proj_dim, 128, pred_dim])
+
+    def forward(self, representation: torch.Tensor) -> torch.Tensor:
+        return self.mlp(representation)
 
 
 class FKPoseDecoder(nn.Module):

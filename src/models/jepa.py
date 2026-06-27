@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from models.components import (
-    ActionEmbedding,
     Encoder,
     Predictor,
     Projector,
@@ -48,8 +47,7 @@ class JEPA(nn.Module):
         for p in self.ema_projector.parameters():
             p.requires_grad = False
 
-        self.action_embedding = ActionEmbedding(num_classes, latent_dim)
-        self.predictor = Predictor(proj_dim, pred_dim, latent_dim, use_latent)
+        self.predictor = Predictor(proj_dim, pred_dim)
         self.vis_decoder = VisualizationDecoder(
             pred_dim, self.num_joints, parents, bone_offsets
         )
@@ -83,36 +81,25 @@ class JEPA(nn.Module):
         h = self.ema_encoder(y)
         return self.ema_projector(h)
 
-    def encode_for_rollout(
-        self, x: torch.Tensor, labels: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        s_x = self.encode_online(x)
-        z_emb = None
-        if self.use_latent:
-            if labels is None:
-                raise ValueError("labels required when use_latent=True")
-            z_emb = self.action_embedding(labels)
-        pred_delta = self.predictor(s_x, z_emb)
-        return s_x + pred_delta
+    def encode_for_rollout(self, x: torch.Tensor) -> torch.Tensor:
+        """Predict the future embedding from a pose (used for autoregressive rollout)."""
+        return self.predictor(self.encode_online(x))
 
     def forward(
         self,
         x: torch.Tensor,
         y: torch.Tensor,
-        labels: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         s_x = self.encode_online(x)
-        s_y = self.encode_ema(y)
-
-        z_emb = None
-        if self.use_latent:
-            if labels is None:
-                raise ValueError("labels required when use_latent=True")
-            z_emb = self.action_embedding(labels)
-
-        s_y_hat = self.predictor(s_x, z_emb)
+        s_y = self.encode_ema(y)  # already detached (frozen EMA, no_grad)
+        s_y_hat = self.predictor(s_x)  # predict the absolute future embedding
         return s_y_hat, s_y, s_x
 
+    def reconstruct(self, poses: torch.Tensor) -> torch.Tensor:
+        """Encode poses then FK-decode back to Cartesian coordinates (detached latent)."""
+        s = self.encode_online(poses).detach()
+        return self.vis_decoder(s)
+
     def decode_pose(self, representation: torch.Tensor) -> torch.Tensor:
-        """Decode latent representation to rigidity-constrained Cartesian coordinates."""
+        """Decode a latent embedding to rigid-bone Cartesian coordinates."""
         return self.vis_decoder(representation)

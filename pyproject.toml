@@ -34,7 +34,6 @@ py-modules = ["utils"]
 
 [project.scripts]
 skeleton-jepa-train = "training.train:main"
-skeleton-jepa-train-decoder = "training.train_decoder:main"
 skeleton-jepa-parse = "data.bvh_parser:main"
 skeleton-jepa-probe = "eval.linear_probe:main"
 skeleton-jepa-rollout = "eval.rollout:main"

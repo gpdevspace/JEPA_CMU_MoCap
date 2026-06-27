@@ -15,23 +15,16 @@ model:
   proj_dim: 256
   pred_dim: 256
   latent_dim: 32
-  num_classes: 6        # Walking, Running, Jumping, Boxing, Dancing, etc.
+  num_classes: 3        # Walking, Jumping, Boxing, etc.
 
 training:
-  use_latent: true     # Set true for Phase 2 latent-conditioned training
+  use_latent: false    # v1: unconditioned predictor (action labels used only for eval)
   epochs: 15
   lr: 0.001
   weight_decay: 1e-5
   ema_momentum_start: 0.996
   ema_momentum_end: 0.999
-  # vicreg block is dead — kept for reference, not used by compute_jepa_loss
-  vicreg:
-    sim_weight: 0.0
-    var_weight: 0.0
-    cov_weight: 0.0
-  kinematic:
-    bone_weight: 0.0
-
-loss:
-  invariance_weight: 1.0
-  variance_weight: 5.0  # Raised from 1.0 — threshold fix means this now actually fires
+  loss:
+    var_weight: 1.0      # VICReg variance hinge (anti-collapse)
+    cov_weight: 0.05     # VICReg covariance decorrelation
+    recon_weight: 1.0    # FK decoder reconstruction (latent -> pose)
