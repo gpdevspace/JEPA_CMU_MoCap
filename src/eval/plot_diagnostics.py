@@ -1,13 +1,14 @@
 """
 viz/plot_diagnostics.py — JEPA model diagnostic plots
 
-Generates five figures saved to outputs/viz/:
+Generates six figures saved to outputs/viz/:
 
   1. pca_embedding.png        — 2D PCA of encoder representations coloured by action
   2. repr_variance.png        — Per-dimension std of s_x (VICReg health check)
-  3. prediction_quality.png   — JEPA pred MSE vs persistence baseline per action class
-  4. cosine_similarity.png    — Cos-sim(s_y_hat, s_y) distribution per action
-  5. recon_quality.png        — GT pose joints vs FK-decoded joints scatter
+  3. eigenspectrum.png        — Covariance eigenvalue spectrum + effective rank + cumulative variance
+  4. prediction_quality.png   — JEPA pred MSE vs persistence baseline per action class
+  5. cosine_similarity.png    — Cos-sim(s_y_hat, s_y) distribution per action
+  6. recon_quality.png        — GT pose joints vs FK-decoded joints scatter
 
 Usage:
   uv run python viz/plot_diagnostics.py
@@ -56,7 +57,7 @@ plt.rcParams.update({
     "legend.edgecolor": GRID,
 })
 
-OUT_DIR = ROOT / "outputs" / "viz"
+OUT_DIR = ROOT / "viz"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -211,7 +212,95 @@ def plot_repr_variance(data: dict) -> None:
     print(f"  saved {out.name}")
 
 
-# ── 3  Prediction quality vs persistence ─────────────────────────────────────
+# ── 3  Eigenvalue spectrum + effective rank ───────────────────────────────────
+
+def plot_eigenspectrum(data: dict) -> None:
+    """
+    Two-panel figure:
+      Left  — covariance eigenvalue spectrum on a log y-axis for s_x and s_ŷ,
+               annotated with effective rank (Roy & Vetterli 2007).
+      Right — cumulative explained variance, showing how many dims are needed
+               to capture 90% of the total variance.
+
+    Effective rank = exp(H(p)) where p_i = λ_i / Σλ and H is Shannon entropy.
+    A value near D (=256) means all dims equally used; near 1 means near-collapse.
+    """
+    def compute_eigenvalues(z: np.ndarray) -> np.ndarray:
+        z_c = z - z.mean(axis=0, keepdims=True)
+        # SVD of the data matrix is numerically stabler than eig of the covariance.
+        _, s, _ = np.linalg.svd(z_c, full_matrices=False)
+        return (s ** 2) / (len(z) - 1)   # eigenvalues of the sample covariance
+
+    def effective_rank(eigenvalues: np.ndarray) -> float:
+        p = eigenvalues / eigenvalues.sum()
+        p = np.clip(p, 1e-10, None)
+        return float(np.exp(-np.sum(p * np.log(p))))
+
+    sx    = data["s_x"]
+    syhat = data["s_y_hat"]
+
+    eigs_sx    = compute_eigenvalues(sx)
+    eigs_syhat = compute_eigenvalues(syhat)
+
+    er_sx    = effective_rank(eigs_sx)
+    er_syhat = effective_rank(eigs_syhat)
+
+    d   = len(eigs_sx)
+    idx = np.arange(d)
+
+    cum_sx    = np.cumsum(eigs_sx    / eigs_sx.sum())
+    cum_syhat = np.cumsum(eigs_syhat / eigs_syhat.sum())
+
+    k90_sx    = int(np.searchsorted(cum_sx,    0.90)) + 1
+    k90_syhat = int(np.searchsorted(cum_syhat, 0.90)) + 1
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ── Left: eigenvalue spectrum (log scale) ──────────────────────────────────
+    ax = axes[0]
+    ax.semilogy(idx, eigs_sx,    color="#00e676", linewidth=1.5,
+                label=f"s_x   eff. rank = {er_sx:.1f} / {d}")
+    ax.semilogy(idx, eigs_syhat, color="#ff6d00", linewidth=1.5, linestyle="--",
+                label=f"s_ŷ   eff. rank = {er_syhat:.1f} / {d}")
+    # vertical markers at effective rank
+    ax.axvline(er_sx,    color="#00e676", linewidth=0.9, linestyle=":", alpha=0.55)
+    ax.axvline(er_syhat, color="#ff6d00", linewidth=0.9, linestyle=":", alpha=0.55)
+    ax.set_xlabel("Eigenvalue index (sorted descending)")
+    ax.set_ylabel("Eigenvalue  (log scale)")
+    ax.set_title("Covariance eigenvalue spectrum")
+    ax.legend(framealpha=0.3)
+    ax.grid(True, which="both", alpha=0.3)
+
+    # ── Right: cumulative explained variance ───────────────────────────────────
+    ax = axes[1]
+    ax.plot(idx, cum_sx    * 100, color="#00e676", linewidth=1.5, label="s_x")
+    ax.plot(idx, cum_syhat * 100, color="#ff6d00", linewidth=1.5, linestyle="--",
+            label="s_ŷ")
+    ax.axhline(90, color="white", linewidth=0.9, linestyle="--", alpha=0.5,
+               label="90 % threshold")
+    ax.axvline(k90_sx,    color="#00e676", linewidth=0.9, linestyle=":", alpha=0.55)
+    ax.axvline(k90_syhat, color="#ff6d00", linewidth=0.9, linestyle=":", alpha=0.55)
+    # annotations: how many dims reach 90%
+    y_anchor = 55
+    for k, color, label in [(k90_sx, "#00e676", "s_x"), (k90_syhat, "#ff6d00", "s_ŷ")]:
+        ax.text(k + 2, y_anchor, f"{label}: {k} dims",
+                color=color, fontsize=9, va="top")
+        y_anchor -= 10
+    ax.set_xlabel("Number of dimensions")
+    ax.set_ylabel("Cumulative explained variance (%)")
+    ax.set_title("Cumulative explained variance")
+    ax.set_ylim(0, 105)
+    ax.legend(framealpha=0.3)
+    ax.grid(True, alpha=0.35)
+
+    fig.tight_layout()
+    out = OUT_DIR / "eigenspectrum.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=BG)
+    plt.close(fig)
+    print(f"  saved {out.name}")
+
+
+# ── 4  Prediction quality vs persistence ─────────────────────────────────────
 
 def plot_prediction_quality(data: dict) -> None:
     sx    = data["s_x"]
@@ -411,6 +500,7 @@ def main() -> None:
     print("Generating plots …")
     plot_pca_embedding(data)
     plot_repr_variance(data)
+    plot_eigenspectrum(data)
     plot_prediction_quality(data)
     plot_cosine_similarity(data)
     plot_recon_quality(data)
