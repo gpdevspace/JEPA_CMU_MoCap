@@ -10,6 +10,7 @@ from models.components import (
     Encoder,
     Predictor,
     Projector,
+    TemporalContextModule,
     VisualizationDecoder,
 )
 
@@ -27,15 +28,25 @@ class JEPA(nn.Module):
         num_joints: int | None = None,
         parents: list[int] | None = None,
         bone_offsets: np.ndarray | None = None,
+        horizons: list[int] | None = None,
+        horizon_emb_dim: int = 16,
+        context_len: int = 1,
     ):
         super().__init__()
         self.use_latent = use_latent
         self.proj_dim = proj_dim
         self.pose_dim = pose_dim
+        self.context_len = context_len
         self.num_joints = num_joints or pose_dim // 3
 
         if parents is None or bone_offsets is None:
             raise ValueError("parents and bone_offsets are required for FK decoder")
+
+        # Phase 2: fuse K context frames into one effective pose before the encoder.
+        # Kept on the online path only — the EMA target encoder stays single-frame.
+        self.temporal_ctx = (
+            TemporalContextModule(pose_dim, context_len) if context_len > 1 else None
+        )
 
         self.encoder = Encoder(pose_dim, repr_dim)
         self.projector = Projector(repr_dim, proj_dim)
@@ -47,7 +58,9 @@ class JEPA(nn.Module):
         for p in self.ema_projector.parameters():
             p.requires_grad = False
 
-        self.predictor = Predictor(proj_dim, pred_dim)
+        self.predictor = Predictor(
+            proj_dim, pred_dim, horizons=horizons, horizon_emb_dim=horizon_emb_dim
+        )
         self.vis_decoder = VisualizationDecoder(
             pred_dim, self.num_joints, parents, bone_offsets
         )
@@ -70,10 +83,15 @@ class JEPA(nn.Module):
             ema_p.data.mul_(m).add_(online_p.data, alpha=1 - m)
 
     def encode_online(self, x: torch.Tensor) -> torch.Tensor:
+        # x is [B, K, pose_dim] when temporal context is active, else [B, pose_dim].
+        if self.temporal_ctx is not None:
+            x = self.temporal_ctx(x)  # [B, K, pose_dim] -> [B, pose_dim]
         h = self.encoder(x)
         return self.projector(h)
 
     def encode_repr(self, x: torch.Tensor) -> torch.Tensor:
+        if self.temporal_ctx is not None:
+            x = self.temporal_ctx(x)
         return self.encoder(x)
 
     @torch.no_grad()
@@ -81,23 +99,26 @@ class JEPA(nn.Module):
         h = self.ema_encoder(y)
         return self.ema_projector(h)
 
-    def encode_for_rollout(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_for_rollout(
+        self, x: torch.Tensor, k: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Predict the future embedding from a pose (used for autoregressive rollout)."""
-        return self.predictor(self.encode_online(x))
+        return self.predictor(self.encode_online(x), k)
 
     def forward(
         self,
         x: torch.Tensor,
         y: torch.Tensor,
+        k: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         s_x = self.encode_online(x)
         s_y = self.encode_ema(y)  # already detached (frozen EMA, no_grad)
-        s_y_hat = self.predictor(s_x)  # predict the absolute future embedding
+        s_y_hat = self.predictor(s_x, k)  # predict the absolute future embedding
         return s_y_hat, s_y, s_x
 
-    def reconstruct(self, poses: torch.Tensor) -> torch.Tensor:
-        """Encode poses then FK-decode back to Cartesian coordinates (detached latent)."""
-        s = self.encode_online(poses).detach()
+    def reconstruct(self, y: torch.Tensor) -> torch.Tensor:
+        """FK-decode a single-frame pose via the EMA path (no context window needed)."""
+        s = self.encode_ema(y)  # EMA encoder/projector, already no_grad
         return self.vis_decoder(s)
 
     def decode_pose(self, representation: torch.Tensor) -> torch.Tensor:

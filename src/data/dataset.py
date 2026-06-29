@@ -22,6 +22,7 @@ class SkeletonPairDataset(Dataset):
     ):
         config = load_config()
         self.processed_dir = Path(processed_dir or ROOT / config["data"]["processed_dir"])
+        self.context_len = config["data"].get("context_len", 1)
         self.fixed_horizon = fixed_horizon
         if fixed_horizon is not None:
             self.horizons = [fixed_horizon]
@@ -74,8 +75,23 @@ class SkeletonPairDataset(Dataset):
         k = self.horizons[idx % len(self.horizons)]
 
         poses = clip["poses"]
-        x = poses[t].astype(np.float32)
-        y = poses[t + k].astype(np.float32)
+
+        # Context: the K frames ending at t (Phase 2). Left-pad with the first
+        # available frame when there isn't enough history. K == 1 reproduces the
+        # original single-frame [pose_dim] behaviour (squeezed below).
+        K = self.context_len
+        start = t - K + 1
+        if start < 0:
+            window = poses[0 : t + 1]
+            pad = np.tile(window[[0]], (K - len(window), 1))
+            window = np.concatenate([pad, window], axis=0)
+        else:
+            window = poses[start : t + 1]            # [K, pose_dim]
+
+        x = window.astype(np.float32)                # [K, pose_dim]
+        if K == 1:
+            x = x[0]                                  # [pose_dim] (back-compat)
+        y = poses[t + k].astype(np.float32)          # [pose_dim] target, unchanged
         label = clip["label"]
 
         return (

@@ -8,7 +8,34 @@ import numpy as np
 import torch
 
 from models.jepa import JEPA
-from utils import load_config, resolve_device, skeleton_fk_args, ROOT
+from utils import (
+    jepa_conditioning_args,
+    load_config,
+    resolve_device,
+    skeleton_fk_args,
+    ROOT,
+)
+
+
+def build_context_windows(poses: np.ndarray, context_len: int, horizon: int) -> np.ndarray:
+    """Build [T, K, pose_dim] sliding windows ending at each usable frame t.
+
+    Mirrors the dataset's left-padding so eval-time inputs match training. With
+    context_len == 1 this returns the flat [T, pose_dim] frames.
+    """
+    usable = poses[: len(poses) - horizon]
+    if context_len <= 1:
+        return usable.astype(np.float32)
+
+    windows = []
+    for t in range(len(usable)):
+        start = max(0, t - context_len + 1)
+        w = poses[start : t + 1]
+        if len(w) < context_len:
+            pad = np.tile(w[[0]], (context_len - len(w), 1))
+            w = np.concatenate([pad, w], axis=0)
+        windows.append(w)
+    return np.stack(windows).astype(np.float32)
 
 
 def load_model(config: dict, device: torch.device) -> tuple[JEPA, dict]:
@@ -29,6 +56,7 @@ def load_model(config: dict, device: torch.device) -> tuple[JEPA, dict]:
         num_classes=config["model"]["num_classes"],
         use_latent=ckpt["config"]["training"]["use_latent"],
         **skeleton_fk_args(meta),
+        **jepa_conditioning_args(ckpt["config"]),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
@@ -84,8 +112,19 @@ def predict_teacher_forced(
     Re-anchored on ground truth every step, so it cannot drift.
     Returns (ground_truth, predicted), aligned frame-for-frame.
     """
-    x = torch.from_numpy(poses[:-horizon].astype(np.float32)).to(device)
-    pred_emb = model.encode_for_rollout(x)          # g(f(x_t)) : predicted future embedding
+    context_len = model.context_len
+    x = torch.from_numpy(
+        build_context_windows(poses, context_len, horizon)
+    ).to(device)
+
+    # Condition the predictor on this horizon when it was trained on it; otherwise
+    # fall back to the default (shortest) horizon.
+    if horizon in model.predictor.horizons:
+        k = torch.full((x.shape[0],), horizon, dtype=torch.long, device=device)
+    else:
+        k = None
+
+    pred_emb = model.encode_for_rollout(x, k)       # g(f(x_t), k) : predicted future embedding
     pred_poses = model.decode_pose(pred_emb).cpu().numpy()
     gt_poses = poses[horizon:]
     return gt_poses, pred_poses

@@ -12,7 +12,13 @@ from torch.utils.data import DataLoader
 from data.dataset import SkeletonPairDataset
 from models.jepa import JEPA
 from training.losses import compute_jepa_loss
-from utils import load_config, resolve_device, skeleton_fk_args, ROOT
+from utils import (
+    jepa_conditioning_args,
+    load_config,
+    resolve_device,
+    skeleton_fk_args,
+    ROOT,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -65,6 +71,7 @@ def train(config_path: Path | None = None) -> None:
         num_classes=config["model"]["num_classes"],
         use_latent=use_latent,
         **skeleton_fk_args(meta),
+        **jepa_conditioning_args(config),
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -83,9 +90,10 @@ def train(config_path: Path | None = None) -> None:
     model.train()
     for epoch in range(epochs):
         epoch_loss = 0.0
-        for x, y, _labels, _k in loader:
+        for x, y, _labels, k in loader:
             x = x.to(device)
             y = y.to(device)
+            k = k.to(device)
 
             momentum = ema_momentum_for_step(
                 global_step,
@@ -95,16 +103,23 @@ def train(config_path: Path | None = None) -> None:
             )
             model.set_ema_momentum(momentum)
 
-            # JEPA forward: predict the EMA target future embedding from the context.
-            s_y_hat, s_y, s_x = model(x, y)
+            # JEPA forward: predict the EMA target future embedding from the
+            # (possibly multi-frame) context, conditioned on the horizon k.
+            s_y_hat, s_y, s_x = model(x, y, k)
 
-            # Joint FK-decoder reconstruction (detached latent: trains the decoder
-            # to read the representation, not reshape it).
-            recon = torch.cat([model.reconstruct(x), model.reconstruct(y)], dim=0)
-            target_poses = torch.cat([x, y], dim=0)
+            # FK-decoder reconstruction as a CLEAN autoencoder on real poses:
+            # decode the EMA embedding of the real target y back to y. Keeps the
+            # decoder faithful to the full pose range (e.g. spread arms).
+            recon = model.reconstruct(y)
+            target_poses = y
+
+            # Decoded PREDICTION (gradient flows to the predictor): forces the
+            # predictor to output embeddings that decode to the correct future pose,
+            # so the rendered prediction is clean and tracks ground truth.
+            pred_pose = model.decode_pose(s_y_hat)
 
             loss, pred_loss, vic_loss, rec_loss = compute_jepa_loss(
-                s_y_hat, s_y, s_x, recon, target_poses, config
+                s_y_hat, s_y, s_x, recon, target_poses, config, pred_pose=pred_pose
             )
 
             if global_step % 20 == 0:

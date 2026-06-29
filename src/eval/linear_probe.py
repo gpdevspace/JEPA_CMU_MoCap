@@ -13,26 +13,53 @@ import torch.nn.functional as F
 from data.dataset import SkeletonPairDataset
 from models.components import Encoder
 from models.jepa import JEPA
-from utils import ACTION_CLASSES, load_config, resolve_device, skeleton_fk_args, ROOT
+from utils import (
+    ACTION_CLASSES,
+    jepa_conditioning_args,
+    load_config,
+    resolve_device,
+    skeleton_fk_args,
+    ROOT,
+)
+
+
+def _context_window(poses: np.ndarray, t: int, context_len: int) -> np.ndarray:
+    """K frames ending at t, left-padded with the first frame (mirrors the dataset)."""
+    if context_len <= 1:
+        return poses[t].astype(np.float32)
+    start = max(0, t - context_len + 1)
+    w = poses[start : t + 1]
+    if len(w) < context_len:
+        pad = np.tile(w[[0]], (context_len - len(w), 1))
+        w = np.concatenate([pad, w], axis=0)
+    return w.astype(np.float32)
 
 
 class FrameClassificationDataset(Dataset):
-    def __init__(self, pair_dataset: SkeletonPairDataset, samples_per_clip: int = 32):
+    """Action-labelled samples. With context_len > 1 each sample is a [K, pose_dim]
+    window so the probe sees the same fused input the v2 encoder was trained on."""
+
+    def __init__(
+        self,
+        pair_dataset: SkeletonPairDataset,
+        samples_per_clip: int = 32,
+        context_len: int = 1,
+    ):
         self.samples = []
         rng = np.random.default_rng(42)
         for clip in pair_dataset.clips:
             poses = clip["poses"]
             label = clip["label"]
             for _ in range(samples_per_clip):
-                t = rng.integers(0, len(poses))
-                self.samples.append((poses[t], label))
+                t = int(rng.integers(0, len(poses)))
+                self.samples.append((_context_window(poses, t, context_len), label))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
-        pose, label = self.samples[idx]
-        return torch.from_numpy(pose.astype(np.float32)), torch.tensor(label, dtype=torch.long)
+        window, label = self.samples[idx]
+        return torch.from_numpy(window), torch.tensor(label, dtype=torch.long)
 
 
 def split_clips(pair_dataset: SkeletonPairDataset, val_ratio: float = 0.2):
@@ -48,13 +75,12 @@ def split_clips(pair_dataset: SkeletonPairDataset, val_ratio: float = 0.2):
 
 
 def probe_accuracy(
-    encoder: Encoder,
+    encode,
     classifier: nn.Linear,
     dataset: FrameClassificationDataset,
     device: torch.device,
     batch_size: int = 256,
 ) -> float:
-    encoder.eval()
     classifier.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     correct = 0
@@ -63,7 +89,7 @@ def probe_accuracy(
         for poses, labels in loader:
             poses = poses.to(device)
             labels = labels.to(device)
-            reps = encoder(poses)
+            reps = encode(poses)
             preds = classifier(reps).argmax(dim=-1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
@@ -71,7 +97,7 @@ def probe_accuracy(
 
 
 def train_classifier(
-    encoder: Encoder,
+    encode,
     train_data: FrameClassificationDataset,
     repr_dim: int,
     num_classes: int,
@@ -85,14 +111,13 @@ def train_classifier(
     criterion = nn.CrossEntropyLoss()
     loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    encoder.eval()
     for _ in range(epochs):
         classifier.train()
         for poses, labels in loader:
             poses = poses.to(device)
             labels = labels.to(device)
             with torch.no_grad():
-                reps = encoder(poses)
+                reps = encode(poses)
             loss = criterion(classifier(reps), labels)
             optimizer.zero_grad()
             loss.backward()
@@ -111,52 +136,62 @@ def run_linear_probe(config_path: Path | None = None) -> None:
     repr_dim = config["model"]["repr_dim"]
     num_classes = config["model"]["num_classes"]
 
+    context_len = config["data"].get("context_len", 1)
     base_dataset = SkeletonPairDataset(processed_dir=processed_dir)
     train_ids, val_ids = split_clips(base_dataset)
     train_frames = FrameClassificationDataset(
-        SkeletonPairDataset(processed_dir=processed_dir, clip_ids=train_ids)
+        SkeletonPairDataset(processed_dir=processed_dir, clip_ids=train_ids),
+        context_len=context_len,
     )
     val_frames = FrameClassificationDataset(
-        SkeletonPairDataset(processed_dir=processed_dir, clip_ids=val_ids)
+        SkeletonPairDataset(processed_dir=processed_dir, clip_ids=val_ids),
+        context_len=context_len,
     )
 
-    trained_encoder = Encoder(pose_dim, repr_dim).to(device)
-    checkpoint_path = ROOT / "checkpoints" / "jepa_latest.pt"
-    if checkpoint_path.exists():
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        jepa = JEPA(
+    def build_jepa() -> JEPA:
+        return JEPA(
             pose_dim=pose_dim,
             repr_dim=repr_dim,
             proj_dim=config["model"]["proj_dim"],
             pred_dim=config["model"]["pred_dim"],
             latent_dim=config["model"]["latent_dim"],
             num_classes=num_classes,
-            use_latent=ckpt["config"]["training"]["use_latent"],
+            use_latent=config["training"]["use_latent"],
             **skeleton_fk_args(meta),
-        )
-        jepa.load_state_dict(ckpt["model_state_dict"], strict=False)
-        trained_encoder.load_state_dict(jepa.encoder.state_dict())
+            **jepa_conditioning_args(config),
+        ).to(device)
+
+    # Probe the full online representation path (temporal context + encoder), which
+    # is the representation v2 actually learns — not the bare single-frame encoder.
+    trained_jepa = build_jepa()
+    checkpoint_path = ROOT / "checkpoints" / "jepa_latest.pt"
+    if checkpoint_path.exists():
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        trained_jepa.load_state_dict(ckpt["model_state_dict"], strict=False)
     else:
         print("Warning: no checkpoint found; using untrained encoder weights")
-
-    for p in trained_encoder.parameters():
+    trained_jepa.eval()
+    for p in trained_jepa.parameters():
         p.requires_grad = False
 
-    random_encoder = Encoder(pose_dim, repr_dim).to(device)
-    for p in random_encoder.parameters():
+    random_jepa = build_jepa().eval()
+    for p in random_jepa.parameters():
         p.requires_grad = False
+
+    trained_encode = trained_jepa.encode_repr
+    random_encode = random_jepa.encode_repr
 
     trained_clf = train_classifier(
-        trained_encoder, train_frames, repr_dim, num_classes, device
+        trained_encode, train_frames, repr_dim, num_classes, device
     )
-    val_acc_trained = probe_accuracy(trained_encoder, trained_clf, val_frames, device)
-    train_acc_trained = probe_accuracy(trained_encoder, trained_clf, train_frames, device)
+    val_acc_trained = probe_accuracy(trained_encode, trained_clf, val_frames, device)
+    train_acc_trained = probe_accuracy(trained_encode, trained_clf, train_frames, device)
 
     random_clf = train_classifier(
-        random_encoder, train_frames, repr_dim, num_classes, device
+        random_encode, train_frames, repr_dim, num_classes, device
     )
-    val_acc_random = probe_accuracy(random_encoder, random_clf, val_frames, device)
-    train_acc_random = probe_accuracy(random_encoder, random_clf, train_frames, device)
+    val_acc_random = probe_accuracy(random_encode, random_clf, val_frames, device)
+    train_acc_random = probe_accuracy(random_encode, random_clf, train_frames, device)
 
     print("Linear Probe Results")
     print("=" * 40)

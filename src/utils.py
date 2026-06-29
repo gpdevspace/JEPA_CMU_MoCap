@@ -52,3 +52,16 @@ def skeleton_fk_args(meta: dict) -> dict:
         "parents": meta["parents"],
         "bone_offsets": np.array(meta["bone_offsets"], dtype=np.float32),
     }
+
+
+def jepa_conditioning_args(config: dict) -> dict:
+    """Horizon-conditioning + temporal-context kwargs for the JEPA constructor.
+
+    Pulled from the (possibly checkpoint-saved) config so a loaded model is built
+    with the same horizons/context_len it was trained with.
+    """
+    return {
+        "horizons": config["data"]["horizons"],
+        "horizon_emb_dim": config["model"].get("horizon_emb_dim", 16),
+        "context_len": config["data"].get("context_len", 1),
+    }

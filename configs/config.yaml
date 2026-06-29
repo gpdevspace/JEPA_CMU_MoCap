@@ -6,7 +6,8 @@ data:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   downsample_rate: 4
-  horizons: [3, 5, 8]
+  horizons: [3, 5, 8]   # multi-horizon (Phase 1: predictor is told which k it targets)
+  context_len: 6        # K past frames fused into one effective pose (Phase 2). 1 = single-frame
   batch_size: 256
 
 model:
@@ -15,6 +16,7 @@ model:
   proj_dim: 256
   pred_dim: 256
   latent_dim: 32
+  horizon_emb_dim: 16   # Phase 1: horizon-conditioning embedding width
   num_classes: 3        # Walking, Jumping, Boxing, etc.
 
 training:
@@ -27,4 +29,9 @@ training:
   loss:
     var_weight: 1.0      # VICReg variance hinge (anti-collapse)
     cov_weight: 0.05     # VICReg covariance decorrelation
-    recon_weight: 1.0    # FK decoder reconstruction (latent -> pose)
+    recon_weight: 5.0    # FK decoder reconstruction (latent -> pose). High weight:
+                         # faithful reconstruction is the visual ceiling for the demo,
+                         # so the decoder must render the full pose range, not the mean.
+    pose_pred_weight: 5.0  # Pose-space prediction loss: decoded predictor output must
+                           # match the real future pose (gradients reach the predictor).
+                           # This is what makes the rendered prediction clean + tracking.

@@ -33,7 +33,14 @@ sys.path.insert(0, str(ROOT_SRC))
 
 from data.dataset import SkeletonPairDataset          # noqa: E402
 from models.jepa import JEPA                          # noqa: E402
-from utils import ACTION_CLASSES, load_config, resolve_device, skeleton_fk_args, ROOT  # noqa: E402
+from utils import (  # noqa: E402
+    ACTION_CLASSES,
+    jepa_conditioning_args,
+    load_config,
+    resolve_device,
+    skeleton_fk_args,
+    ROOT,
+)
 
 # ── palette ───────────────────────────────────────────────────────────────────
 BG   = "#0d0d1a"
@@ -78,6 +85,7 @@ def load_model_and_meta(config: dict, device: torch.device) -> tuple[JEPA, dict]
         num_classes=config["model"]["num_classes"],
         use_latent=ckpt["config"]["training"]["use_latent"],
         **skeleton_fk_args(meta),
+        **jepa_conditioning_args(ckpt["config"]),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
@@ -105,17 +113,22 @@ def collect_embeddings(
     from torch.utils.data import DataLoader
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=0)
 
-    for x, y, labels, _k in loader:
+    for x, y, labels, k in loader:
         x = x.to(device)
         y = y.to(device)
-        s_y_hat, s_y, s_x = model(x, y)
-        recon_x = model.reconstruct(x)
+        k = k.to(device)
+        s_y_hat, s_y, s_x = model(x, y, k)
+        recon_y = model.reconstruct(y)               # EMA-decode the single-frame target
+
+        # x may be a [B, K, pose_dim] context window; keep the current frame (last)
+        # for pose-space persistence comparisons.
+        pose_x = x[:, -1, :] if x.dim() == 3 else x
 
         sx_list.append(s_x.cpu())
         sy_list.append(s_y.cpu())
         syhat_list.append(s_y_hat.cpu())
-        recon_list.append(recon_x.cpu())
-        pose_x_list.append(x.cpu())
+        recon_list.append(recon_y.cpu())
+        pose_x_list.append(pose_x.cpu())
         pose_y_list.append(y.cpu())
         label_list.append(labels)
 
@@ -316,8 +329,9 @@ def plot_prediction_quality(data: dict) -> None:
     # Persistence MSE: predict y by repeating x
     pers_mse = ((sx - sy) ** 2).mean(axis=1)
 
-    # Reconstruction MSE in pose space (decoder quality)
-    recon_mse_pose = ((data["recon"] - pose_x) ** 2).mean(axis=1)
+    # Reconstruction MSE in pose space (decoder quality). recon decodes the
+    # target frame y, so compare against pose_y.
+    recon_mse_pose = ((data["recon"] - pose_y) ** 2).mean(axis=1)
     pers_mse_pose  = ((pose_x - pose_y) ** 2).mean(axis=1)
 
     action_names = [ACTION_CLASSES[i] for i in range(num_classes)]

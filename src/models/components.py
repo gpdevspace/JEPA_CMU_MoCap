@@ -50,14 +50,77 @@ class ActionEmbedding(nn.Module):
 
 
 class Predictor(nn.Module):
-    """Predicts the future embedding from the context embedding (unconditioned)."""
+    """Predicts the future embedding from the context embedding.
 
-    def __init__(self, proj_dim: int = 256, pred_dim: int = 256):
+    Phase 1: horizon-conditioned. The predictor is told which horizon k it is
+    targeting via a learned embedding, so a single network can serve multiple
+    horizons without confusing "3 steps ahead" and "8 steps ahead".
+
+    Residual: the MLP predicts the *change* (delta) from the context embedding,
+    and the output is `s_x + delta`. This anchors the prediction to the current
+    real frame — even if the delta regresses to its mean, the output still varies
+    frame-to-frame with the input, so the decoded skeleton always moves coherently
+    instead of collapsing to a single static mean pose.
+    """
+
+    def __init__(
+        self,
+        proj_dim: int = 256,
+        pred_dim: int = 256,
+        horizons: list[int] | None = None,
+        horizon_emb_dim: int = 16,
+    ):
         super().__init__()
-        self.mlp = MLP([proj_dim, 128, pred_dim])
+        self.horizons = horizons or [3]
+        self._k_to_idx = {k: i for i, k in enumerate(self.horizons)}
+        self.horizon_emb = nn.Embedding(len(self.horizons), horizon_emb_dim)
+        self.mlp = MLP([proj_dim + horizon_emb_dim, 256, pred_dim])
 
-    def forward(self, representation: torch.Tensor) -> torch.Tensor:
-        return self.mlp(representation)
+    def _horizon_idx(self, s_x: torch.Tensor, k: torch.Tensor | None) -> torch.Tensor:
+        if k is None:
+            # Default to the shortest configured horizon (index 0).
+            return torch.zeros(s_x.shape[0], device=s_x.device, dtype=torch.long)
+        return torch.tensor(
+            [self._k_to_idx[int(ki)] for ki in k],
+            device=s_x.device,
+            dtype=torch.long,
+        )
+
+    def forward(
+        self, representation: torch.Tensor, k: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        idx = self._horizon_idx(representation, k)
+        h = self.horizon_emb(idx)
+        delta = self.mlp(torch.cat([representation, h], dim=-1))
+        return representation + delta
+
+
+class TemporalContextModule(nn.Module):
+    """Fuse K context frames into one effective pose representation (Phase 2).
+
+    Each frame is passed through a shared per-frame transform, then combined with
+    learned, softmax-normalized recency weights — recent frames can be weighted
+    more heavily. Output is a single [B, pose_dim] vector consumed by the existing
+    single-frame encoder, so all EMA machinery stays untouched.
+    """
+
+    def __init__(self, pose_dim: int, context_len: int):
+        super().__init__()
+        self.K = context_len
+        # Linear ramp initialisation: most recent frame starts with highest weight.
+        # Softmax of [1,2,...,K] gives a gentle recency prior; the network can still
+        # learn any distribution, but starts from something useful rather than uniform.
+        init_weights = torch.arange(1, context_len + 1, dtype=torch.float)
+        self.weights = nn.Parameter(init_weights)
+        self.mlp = MLP([pose_dim, 256, pose_dim])  # per-frame transform
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, K, pose_dim]
+        B, K, D = x.shape
+        w = torch.softmax(self.weights, dim=0)              # [K] learned recency
+        encoded = self.mlp(x.reshape(B * K, D)).reshape(B, K, D)
+        fused = (encoded * w.view(1, K, 1)).sum(dim=1)      # [B, pose_dim]
+        return fused
 
 
 class FKPoseDecoder(nn.Module):
