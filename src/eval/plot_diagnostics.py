@@ -113,16 +113,19 @@ def collect_embeddings(
     from torch.utils.data import DataLoader
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=0)
 
-    for x, y, labels, k in loader:
+    for x, y, y_vel, labels, k in loader:
         x = x.to(device)
         y = y.to(device)
+        y_vel = y_vel.to(device)
         k = k.to(device)
-        s_y_hat, s_y, s_x = model(x, y, k)
-        recon_y = model.reconstruct(y)               # EMA-decode the single-frame target
+        y_aug = torch.cat([y, y_vel], dim=-1)        # velocity-augmented target [B, 2*pose_dim]
+        s_y_hat, s_y, s_x = model(x, y_aug, k)
+        recon_y = model.reconstruct(y_aug)           # EMA-decode the augmented target -> raw pose
 
-        # x may be a [B, K, pose_dim] context window; keep the current frame (last)
-        # for pose-space persistence comparisons.
-        pose_x = x[:, -1, :] if x.dim() == 3 else x
+        # x is velocity-augmented ([B, K, 2*pose_dim] or [B, 2*pose_dim]); recover the
+        # raw current pose (last frame, first pose_dim dims) for persistence comparisons.
+        pd = y.shape[-1]
+        pose_x = x[:, -1, :pd] if x.dim() == 3 else x[:, :pd]
 
         sx_list.append(s_x.cpu())
         sy_list.append(s_y.cpu())

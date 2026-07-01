@@ -9,6 +9,7 @@ import torch
 
 from models.jepa import JEPA
 from utils import (
+    augment_with_velocity,
     jepa_conditioning_args,
     load_config,
     resolve_device,
@@ -18,14 +19,14 @@ from utils import (
 
 
 def build_context_windows(poses: np.ndarray, context_len: int, horizon: int) -> np.ndarray:
-    """Build [T, K, pose_dim] sliding windows ending at each usable frame t.
+    """Build velocity-augmented sliding windows ending at each usable frame t.
 
-    Mirrors the dataset's left-padding so eval-time inputs match training. With
-    context_len == 1 this returns the flat [T, pose_dim] frames.
+    Mirrors the dataset's left-padding so eval-time inputs match training, then
+    appends per-frame velocity: [T, K, 2*pose_dim] (or [T, 2*pose_dim] when K==1).
     """
     usable = poses[: len(poses) - horizon]
     if context_len <= 1:
-        return usable.astype(np.float32)
+        return augment_with_velocity(usable.astype(np.float32))
 
     windows = []
     for t in range(len(usable)):
@@ -35,7 +36,7 @@ def build_context_windows(poses: np.ndarray, context_len: int, horizon: int) -> 
             pad = np.tile(w[[0]], (context_len - len(w), 1))
             w = np.concatenate([pad, w], axis=0)
         windows.append(w)
-    return np.stack(windows).astype(np.float32)
+    return augment_with_velocity(np.stack(windows).astype(np.float32))
 
 
 def load_model(config: dict, device: torch.device) -> tuple[JEPA, dict]:
@@ -130,20 +131,70 @@ def predict_teacher_forced(
     return gt_poses, pred_poses
 
 
+@torch.no_grad()
+def predict_autoregressive(
+    model: JEPA,
+    poses: np.ndarray,
+    n_steps: int,
+    device: torch.device,
+    horizon: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Feed the model's own decoded predictions back as context (honest drift test).
+
+    Steps one frame at a time (horizon=1, matching the stride-1 training window):
+    seed the rolling window with the first K real frames, then at each step encode
+    -> predict -> decode -> append the decoded pose and slide. Real frames slide out
+    as predicted frames slide in, so decoder error compounds — the honest test of
+    whether the latent motion model is coherent.
+
+    Returns (ground_truth, predicted), aligned frame-for-frame, each [n_steps, pose_dim].
+    Requires len(poses) >= model.context_len + n_steps for the GT alignment.
+    """
+    K = model.context_len
+    history = [poses[i].astype(np.float32) for i in range(K)]
+
+    k = None
+    if horizon in model.predictor.horizons:
+        k = torch.full((1,), horizon, dtype=torch.long, device=device)
+
+    preds = []
+    for _ in range(n_steps):
+        window = np.stack(history[-K:])                       # [K, pose_dim]
+        x = augment_with_velocity(window)                    # [K, 2*pose_dim]
+        if K == 1:
+            x = x[0]
+        x = torch.from_numpy(x).unsqueeze(0).to(device)      # [1, K, 2D] or [1, 2D]
+        pred_emb = model.encode_for_rollout(x, k)
+        pred_pose = model.decode_pose(pred_emb)[0].cpu().numpy()  # [pose_dim]
+        preds.append(pred_pose)
+        history.append(pred_pose)
+
+    predicted = np.stack(preds)                              # [n_steps, pose_dim]
+    gt_poses = poses[K : K + n_steps]                        # aligned ground truth
+    return gt_poses, predicted
+
+
 def run_rollout(
     config_path: Path | None = None,
     steps: int = 150,
     horizon: int = 5,
     clip_name: str | None = None,
+    mode: str = "teacher",
 ) -> dict[str, np.ndarray]:
     config = load_config(config_path)
     device = resolve_device(config)
     processed_dir = ROOT / config["data"]["processed_dir"]
 
     model, _meta = load_model(config, device)
-    poses = pick_clip(processed_dir, max_frames=steps + horizon, clip_name=clip_name)
 
-    gt, pred = predict_teacher_forced(model, poses, horizon, device)
+    if mode == "auto":
+        poses = pick_clip(
+            processed_dir, max_frames=model.context_len + steps, clip_name=clip_name
+        )
+        gt, pred = predict_autoregressive(model, poses, steps, device, horizon=1)
+    else:
+        poses = pick_clip(processed_dir, max_frames=steps + horizon, clip_name=clip_name)
+        gt, pred = predict_teacher_forced(model, poses, horizon, device)
     results = {"ground_truth": gt, "predicted": pred}
 
     out_dir = ROOT / "outputs" / "rollouts"
@@ -156,13 +207,25 @@ def run_rollout(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Teacher-forced JEPA prediction")
+    parser = argparse.ArgumentParser(description="JEPA prediction rollout")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--clip", type=str, default=None, help="Clip stem name, e.g. 35_02")
+    parser.add_argument(
+        "--rollout",
+        choices=["teacher", "auto"],
+        default="teacher",
+        help="teacher = re-anchored on GT each step; auto = feed predictions back (drift test)",
+    )
     args = parser.parse_args()
-    run_rollout(args.config, steps=args.steps, horizon=args.horizon, clip_name=args.clip)
+    run_rollout(
+        args.config,
+        steps=args.steps,
+        horizon=args.horizon,
+        clip_name=args.clip,
+        mode=args.rollout,
+    )
 
 
 if __name__ == "__main__":

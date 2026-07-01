@@ -90,10 +90,14 @@ def train(config_path: Path | None = None) -> None:
     model.train()
     for epoch in range(epochs):
         epoch_loss = 0.0
-        for x, y, _labels, k in loader:
+        for x, y, y_vel, _labels, k in loader:
             x = x.to(device)
             y = y.to(device)
+            y_vel = y_vel.to(device)
             k = k.to(device)
+
+            # Velocity-augmented target [pose ‖ Δpose] for the EMA encoder.
+            y_aug = torch.cat([y, y_vel], dim=-1)
 
             momentum = ema_momentum_for_step(
                 global_step,
@@ -105,21 +109,21 @@ def train(config_path: Path | None = None) -> None:
 
             # JEPA forward: predict the EMA target future embedding from the
             # (possibly multi-frame) context, conditioned on the horizon k.
-            s_y_hat, s_y, s_x = model(x, y, k)
+            s_y_hat, s_y, s_x = model(x, y_aug, k)
 
             # FK-decoder reconstruction as a CLEAN autoencoder on real poses:
-            # decode the EMA embedding of the real target y back to y. Keeps the
-            # decoder faithful to the full pose range (e.g. spread arms).
-            recon = model.reconstruct(y)
+            # decode the EMA embedding of the real target back to the raw pose y.
+            # Trains the decoder only — its gradients never reach the predictor.
+            recon = model.reconstruct(y_aug)
             target_poses = y
 
-            # Decoded PREDICTION (gradient flows to the predictor): forces the
-            # predictor to output embeddings that decode to the correct future pose,
-            # so the rendered prediction is clean and tracks ground truth.
-            pred_pose = model.decode_pose(s_y_hat)
+            # Decode the DETACHED predictor output toward the true future pose. This
+            # trains the decoder to invert predictor outputs (so decoded predictions
+            # land on the pose manifold) without any gradient reaching the predictor.
+            pred_recon = model.decode_pose(s_y_hat.detach())
 
             loss, pred_loss, vic_loss, rec_loss = compute_jepa_loss(
-                s_y_hat, s_y, s_x, recon, target_poses, config, pred_pose=pred_pose
+                s_y_hat, s_y, s_x, recon, target_poses, config, pred_recon=pred_recon
             )
 
             if global_step % 20 == 0:

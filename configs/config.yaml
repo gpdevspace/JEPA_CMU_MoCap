@@ -6,7 +6,9 @@ data:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   downsample_rate: 4
-  horizons: [3, 5, 8]   # multi-horizon (Phase 1: predictor is told which k it targets)
+  horizons: [1, 3, 5, 8] # multi-horizon (Phase 1: predictor is told which k it targets).
+                         # k=1 (v3) lets autoregressive rollout step 1 frame at a time,
+                         # matching the stride-1 training window.
   context_len: 6        # K past frames fused into one effective pose (Phase 2). 1 = single-frame
   batch_size: 256
 
@@ -32,6 +34,5 @@ training:
     recon_weight: 5.0    # FK decoder reconstruction (latent -> pose). High weight:
                          # faithful reconstruction is the visual ceiling for the demo,
                          # so the decoder must render the full pose range, not the mean.
-    pose_pred_weight: 5.0  # Pose-space prediction loss: decoded predictor output must
-                           # match the real future pose (gradients reach the predictor).
-                           # This is what makes the rendered prediction clean + tracking.
+                         # v3: this trains the decoder ONLY — no pose-space loss reaches
+                         # the predictor, which now lives purely in latent space.

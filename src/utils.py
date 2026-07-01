@@ -54,6 +54,25 @@ def skeleton_fk_args(meta: dict) -> dict:
     }
 
 
+def augment_with_velocity(window: np.ndarray) -> np.ndarray:
+    """Concatenate per-frame velocity (Δ = frameᵢ − frameᵢ₋₁) onto each frame.
+
+    Gives the encoder an explicit motion signal ("standing still" vs "mid-jump")
+    without an architecture redesign — the input dim simply doubles to 2·pose_dim.
+
+    Shapes:
+      [..., K, D] -> [..., K, 2D]   (velocity computed along the frame axis -2;
+                                     the oldest frame's velocity is zero-padded)
+      [D]         -> [2D]           (a lone frame has zero velocity)
+    """
+    w = np.asarray(window, dtype=np.float32)
+    if w.ndim == 1:
+        return np.concatenate([w, np.zeros_like(w)], axis=-1)
+    vel = np.zeros_like(w)
+    vel[..., 1:, :] = w[..., 1:, :] - w[..., :-1, :]
+    return np.concatenate([w, vel], axis=-1)
+
+
 def jepa_conditioning_args(config: dict) -> dict:
     """Horizon-conditioning + temporal-context kwargs for the JEPA constructor.
 

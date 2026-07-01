@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils import load_config, ROOT
+from utils import augment_with_velocity, load_config, ROOT
 
 
 class SkeletonPairDataset(Dataset):
@@ -67,7 +67,9 @@ class SkeletonPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index_map)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         clip_idx, t = self.index_map[idx]
         clip = self.clips[clip_idx]
 
@@ -88,15 +90,20 @@ class SkeletonPairDataset(Dataset):
         else:
             window = poses[start : t + 1]            # [K, pose_dim]
 
-        x = window.astype(np.float32)                # [K, pose_dim]
+        # v3: augment each context frame with its velocity -> [K, 2*pose_dim].
+        x = augment_with_velocity(window.astype(np.float32))
         if K == 1:
-            x = x[0]                                  # [pose_dim] (back-compat)
-        y = poses[t + k].astype(np.float32)          # [pose_dim] target, unchanged
+            x = x[0]                                  # [2*pose_dim] (back-compat)
+
+        # Target and its instantaneous velocity (t+k-1 always exists since k >= 1).
+        y = poses[t + k].astype(np.float32)          # [pose_dim] raw target (recon)
+        y_vel = (poses[t + k] - poses[t + k - 1]).astype(np.float32)  # [pose_dim]
         label = clip["label"]
 
         return (
             torch.from_numpy(x),
             torch.from_numpy(y),
+            torch.from_numpy(y_vel),
             torch.tensor(label, dtype=torch.long),
             torch.tensor(k, dtype=torch.long),
         )

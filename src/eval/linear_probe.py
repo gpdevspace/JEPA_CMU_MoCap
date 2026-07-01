@@ -15,6 +15,7 @@ from models.components import Encoder
 from models.jepa import JEPA
 from utils import (
     ACTION_CLASSES,
+    augment_with_velocity,
     jepa_conditioning_args,
     load_config,
     resolve_device,
@@ -24,15 +25,19 @@ from utils import (
 
 
 def _context_window(poses: np.ndarray, t: int, context_len: int) -> np.ndarray:
-    """K frames ending at t, left-padded with the first frame (mirrors the dataset)."""
+    """Velocity-augmented K-frame window ending at t (mirrors the dataset's input).
+
+    Returns [K, 2*pose_dim] (or [2*pose_dim] when context_len==1) so the probe sees
+    the same augmented input the v3 encoder was trained on.
+    """
     if context_len <= 1:
-        return poses[t].astype(np.float32)
+        return augment_with_velocity(poses[t].astype(np.float32))
     start = max(0, t - context_len + 1)
     w = poses[start : t + 1]
     if len(w) < context_len:
         pad = np.tile(w[[0]], (context_len - len(w), 1))
         w = np.concatenate([pad, w], axis=0)
-    return w.astype(np.float32)
+    return augment_with_velocity(w.astype(np.float32))
 
 
 class FrameClassificationDataset(Dataset):

@@ -42,13 +42,18 @@ class JEPA(nn.Module):
         if parents is None or bone_offsets is None:
             raise ValueError("parents and bone_offsets are required for FK decoder")
 
-        # Phase 2: fuse K context frames into one effective pose before the encoder.
-        # Kept on the online path only — the EMA target encoder stays single-frame.
+        # v3: the encoder consumes a velocity-augmented pose [pose ‖ Δpose], so its
+        # input dim is 2·pose_dim. Both the online and EMA paths use this dim, which
+        # keeps the EMA copy valid. Decoder output stays raw pose_dim (num_joints).
+        input_dim = pose_dim * 2
+
+        # Phase 2: fuse K context frames into one effective (augmented) pose before
+        # the encoder. Online path only — the EMA target is a single augmented frame.
         self.temporal_ctx = (
-            TemporalContextModule(pose_dim, context_len) if context_len > 1 else None
+            TemporalContextModule(input_dim, context_len) if context_len > 1 else None
         )
 
-        self.encoder = Encoder(pose_dim, repr_dim)
+        self.encoder = Encoder(input_dim, repr_dim)
         self.projector = Projector(repr_dim, proj_dim)
 
         self.ema_encoder = copy.deepcopy(self.encoder)
@@ -95,8 +100,9 @@ class JEPA(nn.Module):
         return self.encoder(x)
 
     @torch.no_grad()
-    def encode_ema(self, y: torch.Tensor) -> torch.Tensor:
-        h = self.ema_encoder(y)
+    def encode_ema(self, y_aug: torch.Tensor) -> torch.Tensor:
+        # y_aug is the velocity-augmented target [B, 2*pose_dim].
+        h = self.ema_encoder(y_aug)
         return self.ema_projector(h)
 
     def encode_for_rollout(
@@ -108,17 +114,19 @@ class JEPA(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        y: torch.Tensor,
+        y_aug: torch.Tensor,
         k: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # x: velocity-augmented context [B, K, 2*pose_dim] (or [B, 2*pose_dim]).
+        # y_aug: velocity-augmented target [B, 2*pose_dim].
         s_x = self.encode_online(x)
-        s_y = self.encode_ema(y)  # already detached (frozen EMA, no_grad)
+        s_y = self.encode_ema(y_aug)  # already detached (frozen EMA, no_grad)
         s_y_hat = self.predictor(s_x, k)  # predict the absolute future embedding
         return s_y_hat, s_y, s_x
 
-    def reconstruct(self, y: torch.Tensor) -> torch.Tensor:
-        """FK-decode a single-frame pose via the EMA path (no context window needed)."""
-        s = self.encode_ema(y)  # EMA encoder/projector, already no_grad
+    def reconstruct(self, y_aug: torch.Tensor) -> torch.Tensor:
+        """FK-decode the augmented target via the EMA path to raw pose [B, pose_dim]."""
+        s = self.encode_ema(y_aug)  # EMA encoder/projector, already no_grad
         return self.vis_decoder(s)
 
     def decode_pose(self, representation: torch.Tensor) -> torch.Tensor:
